@@ -34,6 +34,12 @@ async function initializeDatabase() {
 
 // Save game data to database
 async function saveGameData(gameData) {
+  console.log('💾 saveGameData called with:', {
+    game_id: gameData.game_id,
+    winner: gameData.winner,
+    total_moves: gameData.total_moves
+  });
+  
   const client = await pool.connect();
   
   try {
@@ -53,8 +59,9 @@ async function saveGameData(gameData) {
       JSON.stringify(gameData)
     ];
     
+    console.log('📝 Executing INSERT query...');
     const result = await client.query(query, values);
-    console.log(`Game data saved with ID: ${result.rows[0].id}`);
+    console.log(`✅ Game data saved with ID: ${result.rows[0].id}`);
     return result.rows[0].id;
   } catch (error) {
     console.error('Error saving game data:', error);
