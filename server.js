@@ -1,5 +1,7 @@
+require('dotenv').config();
 const { createServer } = require("http");
 const { Server } = require("socket.io");
+const { initializeDatabase, saveGameData } = require("./database");
 
 const httpServer = createServer();
 const io = new Server(httpServer, {
@@ -11,6 +13,9 @@ const io = new Server(httpServer, {
 
 // Store active rooms
 const rooms = new Map();
+
+// Initialize database on startup
+initializeDatabase().catch(console.error);
 
 // Helper to initialize game
 function initializeGame(mouseStartCol) {
@@ -42,6 +47,106 @@ function initializeGame(mouseStartCol) {
   };
 }
 
+// Helper to calculate features for ML
+function calculateFeatures(gameState) {
+  const mouse = gameState.pieces.find(p => p.type === "mouse");
+  const cats = gameState.pieces.filter(p => p.type === "cat");
+  
+  // Calculate minimum distance from mouse to any cat
+  let minDistanceToCat = Infinity;
+  cats.forEach(cat => {
+    const distance = Math.abs(mouse.position.row - cat.position.row) + 
+                     Math.abs(mouse.position.col - cat.position.col);
+    minDistanceToCat = Math.min(minDistanceToCat, distance);
+  });
+  
+  // Calculate mouse progress (how close to winning)
+  const mouseProgress = mouse.position.row / 7;
+  
+  // Calculate average cat progress
+  const avgCatProgress = cats.reduce((sum, cat) => {
+    return sum + (7 - cat.position.row) / 7;
+  }, 0) / cats.length;
+  
+  // Count available moves for mouse
+  const mouseValidMoves = getValidMoves(gameState, mouse.id).length;
+  
+  // Count total available moves for all cats
+  const catsValidMoves = cats.reduce((sum, cat) => {
+    return sum + getValidMoves(gameState, cat.id).length;
+  }, 0);
+  
+  return {
+    mouse_row: mouse.position.row,
+    mouse_col: mouse.position.col,
+    min_distance_to_cat: minDistanceToCat,
+    mouse_progress: mouseProgress,
+    avg_cat_progress: avgCatProgress,
+    mouse_mobility: mouseValidMoves,
+    cats_mobility: catsValidMoves,
+    mobility_ratio: mouseValidMoves / (catsValidMoves || 1)
+  };
+}
+
+// Helper to get valid moves for a piece
+function getValidMoves(gameState, pieceId) {
+  const piece = gameState.pieces.find(p => p.id === pieceId);
+  if (!piece) return [];
+  
+  const validMoves = [];
+  const { row, col } = piece.position;
+  
+  // Diagonal moves
+  const directions = piece.type === "mouse" 
+    ? [[-1, -1], [-1, 1], [1, -1], [1, 1]] // Mouse can move forward and backward
+    : [[1, -1], [1, 1]]; // Cats can only move forward (down)
+  
+  directions.forEach(([dRow, dCol]) => {
+    const newRow = row + dRow;
+    const newCol = col + dCol;
+    
+    // Check bounds
+    if (newRow < 0 || newRow > 7 || newCol < 0 || newCol > 7) return;
+    
+    // Check if it's a black square
+    if ((newRow + newCol) % 2 === 0) return;
+    
+    // Check if square is occupied
+    const occupied = gameState.pieces.some(p => 
+      p.position.row === newRow && p.position.col === newCol
+    );
+    
+    if (!occupied) {
+      validMoves.push({ row: newRow, col: newCol });
+    }
+  });
+  
+  return validMoves;
+}
+
+// Helper to check victory conditions
+function checkVictory(gameState) {
+  const mouse = gameState.pieces.find(p => p.type === "mouse");
+  
+  // Mouse wins if reaches row 7
+  if (mouse.position.row === 7) {
+    return "mouse";
+  }
+  
+  // Cats win if mouse has no valid moves
+  const mouseValidMoves = getValidMoves(gameState, mouse.id);
+  if (mouseValidMoves.length === 0) {
+    return "cats";
+  }
+  
+  return null;
+}
+
+// Generate unique game ID
+function generateGameId() {
+  return `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
 io.on("connection", (socket) => {
   console.log("User connected:", socket.id);
 
@@ -54,7 +159,17 @@ io.on("connection", (socket) => {
         mouse: socket.id,
         cats: null
       },
-      gameState: null
+      gameState: null,
+      trainingData: {
+        game_id: generateGameId(),
+        room_id: roomId,
+        mouse_start_col: null,
+        moves: [],
+        states: [],
+        winner: null,
+        total_moves: 0,
+        start_time: Date.now()
+      }
     });
     
     socket.emit("room-created", { roomId, role: "mouse" });
@@ -97,6 +212,16 @@ io.on("connection", (socket) => {
     
     // Initialize game with mouse starting position
     room.gameState = initializeGame(col);
+    room.trainingData.mouse_start_col = col;
+    
+    // Capture initial state
+    const initialFeatures = calculateFeatures(room.gameState);
+    room.trainingData.states.push({
+      move_number: 0,
+      player: "mouse",
+      board_state: JSON.parse(JSON.stringify(room.gameState.pieces)),
+      features: initialFeatures
+    });
     
     // Send initial game state to both players
     io.to(roomId).emit("game-state", room.gameState);
@@ -118,10 +243,65 @@ io.on("connection", (socket) => {
       return; // Not this player's turn
     }
     
+    // Capture state before move
+    const beforeState = JSON.parse(JSON.stringify(room.gameState.pieces));
+    const beforeFeatures = calculateFeatures(room.gameState);
+    
     // Update piece position
     const piece = room.gameState.pieces.find(p => p.id === move.pieceId);
     if (piece) {
+      const fromPosition = { ...piece.position };
       piece.position = move.to;
+      
+      // Increment move counter
+      room.trainingData.total_moves++;
+      
+      // Check victory
+      const winner = checkVictory(room.gameState);
+      if (winner) {
+        room.gameState.winner = winner;
+        room.trainingData.winner = winner;
+      }
+      
+      // Calculate features after move
+      const afterFeatures = calculateFeatures(room.gameState);
+      
+      // Store move data
+      const moveData = {
+        move_number: room.trainingData.total_moves,
+        player: currentPlayer,
+        piece_id: move.pieceId,
+        from: fromPosition,
+        to: move.to,
+        board_state_before: beforeState,
+        board_state_after: JSON.parse(JSON.stringify(room.gameState.pieces)),
+        features_before: beforeFeatures,
+        features_after: afterFeatures,
+        valid_moves_before: getValidMoves({ pieces: beforeState }, move.pieceId),
+        reward: winner === currentPlayer ? 1 : (winner ? -1 : 0)
+      };
+      
+      room.trainingData.moves.push(moveData);
+      room.trainingData.states.push({
+        move_number: room.trainingData.total_moves,
+        player: currentPlayer,
+        board_state: JSON.parse(JSON.stringify(room.gameState.pieces)),
+        features: afterFeatures
+      });
+      
+      // If game ended, save to database
+      if (winner) {
+        room.trainingData.end_time = Date.now();
+        room.trainingData.duration_ms = room.trainingData.end_time - room.trainingData.start_time;
+        
+        saveGameData(room.trainingData)
+          .then(() => {
+            console.log(`Game ${room.trainingData.game_id} saved to database. Winner: ${winner}`);
+          })
+          .catch(err => {
+            console.error('Error saving game data:', err);
+          });
+      }
       
       // Switch turn
       room.gameState.currentTurn = currentPlayer === "mouse" ? "cats" : "mouse";
