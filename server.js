@@ -138,9 +138,14 @@ function getValidMoves(gameState, pieceId) {
 // Helper to check victory conditions
 function checkVictory(gameState) {
   const mouse = gameState.pieces.find(p => p.type === "mouse");
+  const cats = gameState.pieces.filter(p => p.type === "cat");
   
-  // Mouse wins if reaches row 7
-  if (mouse.position.row === 7) {
+  // Find the cat that is closest to the mouse (most advanced)
+  const maxCatRow = Math.max(...cats.map(cat => cat.position.row));
+  
+  // Mouse wins if reaches the same row as the most advanced cat or beyond
+  // Because if mouse is at same row as last cat, next move will pass all cats
+  if (mouse.position.row >= maxCatRow) {
     return "mouse";
   }
   
