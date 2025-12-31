@@ -305,12 +305,19 @@ io.on("connection", (socket) => {
         room.trainingData.end_time = Date.now();
         room.trainingData.duration_ms = room.trainingData.end_time - room.trainingData.start_time;
         
+        console.log(`🏆 Game ended! Winner: ${winner}`);
+        console.log(`📊 Saving game data to database...`);
+        console.log(`   Game ID: ${room.trainingData.game_id}`);
+        console.log(`   Total moves: ${room.trainingData.total_moves}`);
+        console.log(`   Duration: ${room.trainingData.duration_ms}ms`);
+        
         saveGameData(room.trainingData)
-          .then(() => {
-            console.log(`Game ${room.trainingData.game_id} saved to database. Winner: ${winner}`);
+          .then((id) => {
+            console.log(`✅ Game ${room.trainingData.game_id} saved to database with ID: ${id}. Winner: ${winner}`);
           })
           .catch(err => {
-            console.error('Error saving game data:', err);
+            console.error('❌ Error saving game data:', err);
+            console.error('   Game data:', JSON.stringify(room.trainingData, null, 2));
           });
       }
       
