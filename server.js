@@ -1,9 +1,20 @@
 require('dotenv').config();
+const express = require("express");
+const cors = require("cors");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
-const { initializeDatabase, saveGameData } = require("./database");
+const { initializeDatabase, saveGameData, getAllGames, getStatistics } = require("./database");
 
-const httpServer = createServer();
+const app = express();
+const httpServer = createServer(app);
+
+// Middleware
+app.use(cors({
+  origin: process.env.CLIENT_URL || "http://localhost:3000"
+}));
+app.use(express.json());
+
+// Socket.io configuration
 const io = new Server(httpServer, {
   cors: {
     origin: process.env.CLIENT_URL || "http://localhost:3000",
@@ -343,6 +354,60 @@ io.on("connection", (socket) => {
     }
   });
 });
+
+// ============================================
+// HTTP REST API Endpoints
+// ============================================
+
+// Health check
+app.get("/", (req, res) => {
+  res.json({ 
+    status: "ok", 
+    message: "Mouse & Cat Training Data Server",
+    version: "1.0.0"
+  });
+});
+
+// Get statistics
+app.get("/api/statistics", async (req, res) => {
+  try {
+    const stats = await getStatistics();
+    res.json(stats);
+  } catch (error) {
+    console.error("Error getting statistics:", error);
+    res.status(500).json({ error: "Error fetching statistics" });
+  }
+});
+
+// Download all training data as JSON
+app.get("/api/download-dataset", async (req, res) => {
+  try {
+    const limit = parseInt(req.query.limit) || 10000;
+    const games = await getAllGames(limit);
+    
+    // Set headers for file download
+    res.setHeader('Content-Type', 'application/json');
+    res.setHeader('Content-Disposition', `attachment; filename=training_data_${Date.now()}.json`);
+    
+    res.json({
+      metadata: {
+        total_games: games.length,
+        exported_at: new Date().toISOString(),
+        format_version: "1.0"
+      },
+      games: games
+    });
+    
+    console.log(`Dataset downloaded: ${games.length} games`);
+  } catch (error) {
+    console.error("Error downloading dataset:", error);
+    res.status(500).json({ error: "Error downloading dataset" });
+  }
+});
+
+// ============================================
+// Start Server
+// ============================================
 
 const PORT = process.env.PORT || 3001;
 
